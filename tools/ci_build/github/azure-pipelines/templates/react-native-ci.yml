@@ -285,7 +285,7 @@ stages:
             jdkDirectory: '$(JAVA_HOME_11_X64)'
             sonarQubeRunAnalysis: false
             spotBugsAnalysis: false
-        displayName: Run React Native Android e2e Tests
+          displayName: Run React Native Android e2e Tests
 
     - script: |
         export FORCE_BUNDLING=1
