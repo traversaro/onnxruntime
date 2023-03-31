@@ -19,7 +19,7 @@ parameters:
 
 steps:
   - script: |
-      ccache || brew install ccache
+      which ccache || brew install ccache
       echo "##vso[task.prependpath]/usr/local/opt/ccache/libexec"
       mkdir -p "${{ parameters.CACHE_DIR }}"
     displayName: Install ccache and update PATH to use linked versions of gcc, cc, etc
@@ -46,4 +46,4 @@ steps:
     displayName: Show Cache stats and Clear stats.
     env:
       CCACHE_DIR: ${{parameters.CACHE_DIR}}
-      condition: succeededOrFailed()
+      condition: always()

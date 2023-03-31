@@ -118,6 +118,9 @@ stages:
             env:
               CC: clang
               CXX: clang++
+              CCACHE_CPP2: 1
+              CCACHE_DEPEND: 1
+              CCACHE_SLOPPINESS: modules
               CCACHE_DIR: $(ORT_CACHE_DIR)
               CCACHE_DEBUG: 1
               CCACHE_DEBUGDIR: $(System.DefaultWorkingDirectory)/ccache-debug-1
