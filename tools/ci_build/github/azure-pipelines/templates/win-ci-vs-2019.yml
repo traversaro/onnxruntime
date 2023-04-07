@@ -202,6 +202,12 @@ jobs:
       logProjectEvents: false
       workingFolder: '$(Build.BinariesDirectory)\${{ parameters.BuildConfig }}'
       createLogFile: true
+    env:
+      CCACHE_DEBUG: 1
+      CCACHE_DEBUGDIR: $(System.DefaultWorkingDirectory)/ccache-debug-1
+
+  - publish: $(System.DefaultWorkingDirectory)/ccache-debug-1
+    artifact: ccache-debug-1
 
   - powershell: |
       ccache -sv
