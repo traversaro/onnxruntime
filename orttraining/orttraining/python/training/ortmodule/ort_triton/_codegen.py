@@ -3,547 +3,329 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
+import sympy
+import torch
+from sympy.codegen.rewriting import create_expand_pow_optimization
 
-from ._common import CodeGenContext, HardwareContext, NodeVisitor, SpecialVar
+from ._common import CodegenContext, NodeVisitor, SpecialVar
 from ._ir import (
-    ComputeBuffer,
     ComputeNode,
-    ExecutionBlock,
-    FunctionNode,
-    Indexer,
+    DropoutNode,
+    ElementwiseKernelNode,
+    ElementwiseOffsetNode,
+    IONode,
     IRNode,
-    Loop,
-    MaskLoadNode,
-    MaskStoreNode,
+    KernelNode,
     ModuleNode,
+    ReduceKernelNode,
     ReduceNode,
+    ReduceOffsetNode,
 )
-from ._lowering import GraphLowering
-from ._op_config import is_reduction_node
+from ._lowering import lower
 from ._sorted_graph import SortedGraph
+from ._sympy_utils import sympy_dot, sympy_symbol
+from ._utils import may_add_brackets
 
 
-class TritonCodeGen(NodeVisitor):
+class TritonCodegen(NodeVisitor):
     def __init__(self):
         super().__init__()
 
-    def visit(self, node: IRNode, context: CodeGenContext, indent: int):
-        fn = getattr(self, node.__class__.__name__)
-        assert fn is not None, "unimplemented node: %s" % node.__class__.__name__
-        return fn(node, context, indent)
+    def codegen(self, node: IRNode, context: CodegenContext, indent: int):
+        func = getattr(self, node.__class__.__name__)
+        assert func is not None, "unimplemented node: %s" % node.__class__.__name__
+        return func(node, context, indent)
 
-    def Loop(self, node: Loop, var_context: CodeGenContext, indent: int):
-        var_map = var_context.var_map
-        # vec_var_set has the scope of the loop
-        # it would be created and destroyed in the loop
-        vec_var_set = var_context.vectorized_var_set
-        need_indent = " " * indent
-        dec_header = ""
-        # forward declaration
-        # reused_var is the variable that is reused in the following loop
-        for reused_var, buffer_l in node.forward_var_map.items():
-            # no recompute, a block calculate a row of data
-            if node.step == node.end:
-                break
-            # if we do recompute
-            buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
-            if buffer.shape is not None and buffer.shape[-1] == 1:
-                if reused_var not in node.reduction_var:
-                    init_val = 0.0
-                elif "sum" in node.reduction_var[reused_var].lower():
-                    init_val = 0.0
-                elif "max" in node.reduction_var[reused_var].lower():
-                    init_val = "-3.40082e38"
-                elif "min" in node.reduction_var[reused_var].lower():
-                    init_val = "3.40082e38"
-                # TODO elif exp/log
-                else:
-                    assert False, "unsupported reduction type: %s" % node.reduction_var[reused_var]
+    def ElementwiseOffsetNode(self, node: ElementwiseOffsetNode, context: CodegenContext, indent: int):
+        offset_str = "xindex"
+        mask_str = "xmask"
+        if not node.same_shape:
+            idx_var = [f"x{idx}" for idx in range(len(node.strides))]
+            expand_opt = create_expand_pow_optimization(6)
+            offset_str = str(expand_opt(sympy_dot(sympy_symbol(idx_var), node.strides)))
+            if offset_str == "0":
+                offset_str = ""
+                mask_str = ""
+        # return offset and mask separated by "|".
+        return f"{offset_str}|{mask_str}"
 
-                dec_header += need_indent + f"{var_map[reused_var]} = {init_val}\n"
-                # Ideally, we should not have this special case handling,
-                # this var is not a reduction var and it's has shape[-1]=1
-                # but we don't have a CSE pass to remove the redundant computation,
-                # so we need to do this to avoid more redundant
-                if not node.recompute or reused_var in node.reduction_var:
-                    dec_header += (
-                        need_indent + f"vec_{var_map[reused_var]} = tl.zeros([RBLOCK], dtype=tl.{buffer.dtype.name})\n"
-                    )
-                    vec_var_set.add(var_map[reused_var])
-                    node.var_need_post_process[reused_var] = f"vec_{var_map[reused_var]}"
+    def ReduceOffsetNode(self, node: ReduceOffsetNode, context: CodegenContext, indent: int):
+        xoffset_str = "xoffset"
+        if not node.same_x_shape:
+            idx_var = [f"x{idx}" for idx in range(len(node.strides))]
+            expand_opt = create_expand_pow_optimization(6)
+            xoffset_str = str(expand_opt(sympy_dot(sympy_symbol(idx_var), node.strides)))
+            if xoffset_str == "0":
+                xoffset_str = ""
+        if xoffset_str != "" and not node.single_element:
+            if xoffset_str == "1":
+                xoffset_str = f"{node.last_dim}"
             else:
-                assert False, f"buffer:{buffer.name} {buffer.shape} should be defined in the ExecutionBlock"
+                xoffset_str = f"{may_add_brackets(xoffset_str)} * {node.last_dim}"
 
-        # forward declare gpu pid vars
-        src_code = dec_header
-        if node.parallel:
-            nest_vars = [node.var] + [lv.var for lv in node.parallel_nest_loop]
-            p_var = "_".join(nest_vars)
-            nest_shape = [lv.end for lv in node.parallel_nest_loop]
-            nest_stride = nest_shape[-1:]
-            for i in range(len(nest_shape) - 2, -1, -1):
-                nest_stride.insert(0, nest_stride[0] * nest_shape[i])
+        offset_str = xoffset_str
+        mask_str = ""
+        if not node.single_element:
+            offset_str = f"{xoffset_str} + rindex" if xoffset_str != "" else "rindex"
+            mask_str = "rmask"
+        # return offset and mask separated by "|".
+        return f"{offset_str}|{mask_str}"
 
-            src_code += need_indent + f"{p_var} = tl.program_id(0)\n"
-            for idx, nt_var in enumerate(nest_vars):
-                tdiv = f"//({nest_stride[idx]})" if idx < len(nest_stride) else ""
-                tmod = f"%({nest_shape[idx-1]})" if idx > 0 else ""
-                src_code += need_indent + f"{nt_var} = ({p_var}{tdiv}){tmod}\n"
-            src_code += need_indent + f"{SpecialVar().rbase} = tl.arange(0, RBLOCK)\n\n\n"
-        else:
-            if node.step == node.end:
-                # TODO FIXME, remove the hack here
-                # It's a bit ambiguous to represent reduction node
-                # max(vec)===> max(vec, tmp)+max(tmp)
-                # the first max is not reduction node, but the second one is
-                # however, if we didn't do recomputation, we need to do the first one
-                for idx, g in enumerate(node.body):
-                    if is_reduction_node(g.op_type):
-                        g.is_final = True
+    def IONode(self, node: IONode, context: CodegenContext, indent: int):
+        space_indent = " " * indent
+        name = node.tensor_info.name
+        var_name = context.get_variable_name(name)
+        internal_var_name = context.get_internal_variable_name(name)
+        assert var_name != internal_var_name, f"variable name {var_name} and its internal variable name should not be the same."
 
-                # hardcode, roffset triton_rmask
-                src_code += need_indent + f"roffset = {SpecialVar().rbase}\n"
-                src_code += need_indent + f"triton_rmask = roffset < tl.minimum({SpecialVar().rblock}, {node.end})\n"
-            else:
-                # it's the recompute branch
-                assert node.start == 0, "only support start from 0"
-                src_code += "\n"
-                # hardcode triton_rmask_s0
-                src_code += (
-                    need_indent
-                    + f"triton_rmask_s0 = {SpecialVar().rbase} < tl.minimum({SpecialVar().rblock}, {node.end})\n"
-                )
+        offset_str, mask_str = tuple(node.offset_node.codegen(self, context, indent).split("|"))
+        if offset_str != "":
+            offset_str = f" + {offset_str}"
+        if mask_str != "":
+            mask_str = f", {mask_str}"
+        if node.is_load and mask_str != "":
+            mask_str += ", other=0.0"
 
-                src_code += need_indent + f"for {node.var} in range({node.start}, {node.end}, {node.step}):\n"
-                indent += 4
-                need_indent = " " * indent
-                if node.recompute:
-                    src_code += need_indent + f"roffset = {SpecialVar().rbase} + i_0\n"
-                    src_code += (
-                        need_indent + f"triton_rmask = roffset < tl.minimum({SpecialVar().rblock}, {node.end})\n"
-                    )
-                else:
-                    src_code += need_indent + f"roffset = {SpecialVar().rbase}\n"
-                    src_code += (
-                        need_indent + f"triton_rmask = roffset < tl.minimum({SpecialVar().rblock}, {node.end})\n"
-                    )
+        if node.is_load:
+            code = f"{space_indent}{internal_var_name} = tl.load({var_name}{offset_str}{mask_str})\n"
+            # if node.offset_node.single_element:
+            #     code += f"{space_indent}{internal_var_name} = tl.broadcast_to({internal_var_name}, [{SpecialVar.rblock}])\n"
+            return code
+        return f"{space_indent}tl.store({var_name}{offset_str}, {internal_var_name}{mask_str})\n"
 
-        if isinstance(node.body, list):
-            for idx, g in enumerate(node.body):
-                src_code += g.code_gen(self, var_context, indent)
-        else:
-            src_code += node.body.code_gen(self, var_context, indent)
-        return src_code
+    def _gen_kernel_signature(self, node: KernelNode, context: CodegenContext, block_var: str, indent: int) -> str:
+        input_args = [context.get_variable_name(input.name) for input in node.inputs]
+        input_args_str = ", ".join(input_args)
+        if input_args_str != "":
+            input_args_str += ", "
 
-    # we are doing the final reduction here. max/min/sum
-    def PostProcessBlock(self, node: IRNode, var_context: CodeGenContext, indent: int):
-        var_map = var_context.var_map
-        need_indent = " " * indent
-        to_be_handled_vars_map = node.body[0].var_need_post_process
-        src_code = ""
-        for s_var, v_var in to_be_handled_vars_map.items():
-            assert s_var in var_map and s_var in node.global_connections, f"{s_var} not in var_map"
-            op_type = node.global_connections[s_var].producers[0].op_type
-            w_var = var_map[s_var]
-            other_value = 0.0
-            if op_type == "ReduceSum":
-                method = "sum"
-                src_code += need_indent + f"{w_var} = tl.sum({v_var}, axis=0)\n"
-            elif op_type == "ReduceMax":
-                method = "max"
-                src_code += need_indent + f"{w_var} = tl.max({v_var}, axis=0)\n"
-            elif op_type == "ReduceMin":
-                other_value = float("inf")
-                method = "min"
-            else:
-                raise NotImplementedError(f"not support {op_type} yet")
+        output_args = [context.get_variable_name(output.name) for output in node.outputs]
+        output_args_str = ", ".join(output_args) + ", "
 
-            src_code += need_indent + f"{v_var} = tl.where(triton_rmask_s0, {v_var}, {other_value})\n"
-            src_code += need_indent + f"{w_var} = tl.{method}({v_var}, axis=0)\n"
-            src_code += need_indent + f"{v_var} = {w_var}\n"
-        return src_code
+        other_input_args = "seed_cuda, " if node.has_dropout else ""
+        # Support symbolic shape if any.
+        symbolic_shape_args_str = ", ".join(node.symbolic_shape_variables)
+        if symbolic_shape_args_str != "":
+            other_input_args += f"{symbolic_shape_args_str}, "
 
-    def FunctionNode(self, node: FunctionNode, var_context: CodeGenContext, indent: int):
-        if not var_context:
-            var_map = node.body[0].var_map
-
-        func_input_arg = [f"e_{var_map[i.name]}" for i in node.input]
-        func_input_arg = ", ".join(func_input_arg)
-
-        func_output_arg = [f"e_{var_map[i.name]}" for i in node.output]
-        func_output_arg = ", ".join(func_output_arg)
-
-        # support dynamic shape.
-        # if we are passing concrete shape, then it's None
-        dynamic_shape_arg = [f"{sp}" for sp in node.shape_var]
-        dynamic_shape_arg = ", ".join(dynamic_shape_arg)
-        if dynamic_shape_arg:
-            dynamic_shape_arg += ", "
-
-        func_signature = (
-            f"def {node.name}({func_input_arg}, {func_output_arg}, {dynamic_shape_arg}"
-            + f" {SpecialVar().rblock} : tl.constexpr):\n"
+        space_indent = " " * indent
+        return (
+            f"{space_indent}@triton.jit\n"
+            f"{space_indent}def {node.name}({input_args_str}{output_args_str}"
+            f"{other_input_args}{block_var}: tl.constexpr):\n"
         )
 
-        code = ""
-        code += func_signature
+    def _gen_strides(self, shape: List) -> List:
+        rank = len(shape)
+        if rank == 0:
+            return []
+        strides = [sympy.Integer(1)]
+        if rank > 1:
+            for i in range(len(shape) - 2, -1, -1):
+                strides.insert(0, strides[0] * shape[i + 1])
+        return strides
+
+    def ElementwiseKernelNode(self, node: ElementwiseKernelNode, context: CodegenContext, indent: int) -> str:
+        src_code = self._gen_kernel_signature(node, context, SpecialVar.xblock, indent)
         indent += 4
+        space_indent = " " * indent
 
-        # A100?H100
-        assert node.hw_context is not None
-        node.body[0].hw_context = node.hw_context
+        target_shape = node.target_tensor_info.shape
+        strides = self._gen_strides(target_shape)
+        rank = len(strides)
+        xnumel = strides[0] * target_shape[0] if rank > 0 else sympy.Integer(1)
+        src_code += f"{space_indent}xoffset = tl.program_id(0) * {SpecialVar.xblock}\n"
+        src_code += f"{space_indent}xindex = xoffset + tl.arange(0, {SpecialVar.xblock})\n"
+        src_code += f"{space_indent}xmask = xindex < {xnumel}\n"
+        for idx in range(len(target_shape)):
+            if idx in node.dims_offset_compute:
+                div_str = f" // {may_add_brackets(str(strides[idx]))}" if idx != rank - 1 else ""
+                mod_str = f" % {may_add_brackets(str(target_shape[idx]))}" if idx != 0 else ""
+                src_code += f"{space_indent}x{idx} = xindex{div_str}{mod_str}\n"
+        src_code += "\n"
 
-        # a function has definitely a body as we said. ExecutionBlock used to represent different loops
-        # we have to do it as different functions
-        code += node.body[0].code_gen(self, None, indent)
+        if node.has_dropout:
+            src_code += f"{space_indent}t_seed_cuda = tl.load(seed_cuda)\n"
+            src_code += f"{space_indent}t_seed_cuda = tl.broadcast_to(t_seed_cuda, [{SpecialVar.xblock}])\n"
 
-        # when generate code for triton_ort_training. we are running in JIT mode, so all the shapes are known
-        import torch
+        for ir_node in node.sub_nodes:
+            src_code += ir_node.codegen(self, context, indent)
+        return src_code
 
-        final_shape = list(node.output[0].shape)
-        for out in node.output:
-            assert len(out.shape) == len(final_shape), "output shape dim not match"
-            for idx, v in enumerate(final_shape):
-                final_shape[idx] = max(v, out.shape[idx])
-        n_elements_in_last_dim = final_shape[-1]
+    def ReduceKernelNode(self, node: ReduceKernelNode, context: CodegenContext, indent: int):
+        src_code = self._gen_kernel_signature(node, context, SpecialVar.rblock, indent)
+        indent += 4
+        space_indent = " " * indent
 
-        # allocate output tensor
-        alloc_output_tensor_code = ""
-        for idx, out in enumerate(node.output):
-            torch_dtype = torch.from_numpy(np.zeros(1, dtype=node.output[idx].dtype)).dtype
-            # to_dlpack() is not supported for bool type, so we need to convert it to uint8
-            if torch_dtype == torch.bool:
-                torch_dtype = torch.uint8
-            alloc_output_tensor_code += (
-                f"    outputs.append(torch.zeros({tuple(out.shape)}, dtype={torch_dtype}, device=inputs[0].device))\n"
-            )
+        # Support reduce on last axis only for now.
+        target_shape = node.target_tensor_info.shape
+        x_shape = target_shape[:-1]
+        strides = self._gen_strides(x_shape)
+        x_rank = len(strides)
+        rnumel = target_shape[-1]
+        src_code += f"{space_indent}xoffset = tl.program_id(0)\n"
+        src_code += f"{space_indent}{SpecialVar.rbase} = tl.arange(0, {SpecialVar.rblock})\n"
+        src_code += f"{space_indent}rindex = {SpecialVar.rbase}\n"
+        src_code += f"{space_indent}rmask = rindex < {rnumel}\n"
+        for idx in range(len(x_shape)):
+            if idx in node.dims_offset_compute:
+                div_str = f" // {may_add_brackets(str(strides[idx]))}" if idx != x_rank - 1 else ""
+                mod_str = f" % {may_add_brackets(str(x_shape[idx]))}" if idx != 0 else ""
+                src_code += f"{space_indent}x{idx} = xoffset{div_str}{mod_str}\n"
+        src_code += "\n"
 
-        code += f"""
+        if node.has_dropout:
+            src_code += f"{space_indent}t_seed_cuda = tl.load(seed_cuda)\n"
+            src_code += f"{space_indent}t_seed_cuda = tl.broadcast_to(t_seed_cuda, [{SpecialVar.rblock}])\n"
 
-def launch_{node.name}(inputs_):
-    inputs = inputs_
-    outputs=[]
-{alloc_output_tensor_code}
+        for ir_node in node.sub_nodes:
+            src_code += ir_node.codegen(self, context, indent)
+        return src_code
 
-    n_elements_in_last_dim = {n_elements_in_last_dim}
-    paralleled_blocks = {np.prod(final_shape)//n_elements_in_last_dim}
+    _COMPUTE_CODE_TEMPLATES = {
+        "Add": "{indent}{o0} = {i0} + {i1}\n",
+        "Sub": "{indent}{o0} = {i0} - {i1}\n",
+        "Mul": "{indent}{o0} = {i0} * {i1}\n",
+        "Div": "{indent}{o0} = {i0} / {i1}\n",
+        "Relu": "{indent}{o0} = tl.maximum({i0}, '0.f')\n",
+        "Pow": "{indent}{o0} = tl.libdevice.pow({i0}, {i1})\n",
+        "Pow2": "{indent}{o0} = {i0} * {i0}\n",
+        "Pow3": "{indent}{o0} = {i0} * {i0} * {i0}\n",
+        "Sqrt": "{indent}{o0} = tl.sqrt({i0})\n",
+        "Rsqrt": "{indent}{o0} = 1.0 / tl.sqrt({i0})\n",
+        "Cast": "{indent}{o0} = {i0}.to(tl.{dtype})\n",
+        "CastBool": "{indent}{o0} = {i0} != 0\n",
+        "Erf": "{indent}{o0} = tl.libdevice.erf({i0})\n",
+        "Gelu": "{indent}{o0} = (tl.libdevice.erf({i0} / 1.41421356237) + 1.0) * 0.5\n",
+        "Exp": "{indent}{o0} = tl.exp({i0})\n",
+        "Tanh": "{indent}{o0} = tl.libdevice.tanh({i0})\n",
+        "Where": "{indent}{o0} = tl.where({i0}, {i1}, {i2})\n",
+        "Sigmoid": "{indent}{o0} = tl.sigmoid({i0})\n",
+        "Log": "{indent}{o0} = tl.log({i0})\n",
+        "DropoutGrad": "{indent}p = 1 - {i2}\n{indent}{o0} = tl.where({i1}, {i0} / p, 0.0)\n",
+        "Identity": "{indent}{o0} = {i0}\n",
+    }
 
-    grid = lambda meta: (paralleled_blocks* triton.cdiv(n_elements_in_last_dim, meta['RBLOCK']),)
-    {node.name}[grid](*inputs, *outputs, RBLOCK=triton.next_power_of_2(n_elements_in_last_dim))
-    return outputs
-"""
+    def ComputeNode(self, node: ComputeNode, context: CodegenContext, indent: int):
+        space_indent = " " * indent
+        kwargs = {}
+        for idx, input in enumerate(node.inputs):
+            kwargs[f"i{idx}"] = context.get_internal_variable_name(input.name)
+        for idx, output in enumerate(node.outputs):
+            kwargs[f"o{idx}"] = context.get_internal_variable_name(output.name)
+
+        op_type = node.op_type
+        if op_type == "Pow":
+            if kwargs["i1"] == 2:
+                op_type = "Pow2"
+            elif kwargs["i1"] == 3:
+                op_type = "Pow3"
+            elif kwargs["i1"] == 0.5:
+                op_type = "Sqrt"
+
+        if op_type == "Cast":
+            from_dtype = node.inputs[0].dtype.type
+            to_dtype = node.outputs[0].dtype.type
+            if from_dtype == to_dtype:
+                op_type = "Identity"
+            elif to_dtype == np.bool_:
+                op_type = "CastBool"
+            else:
+                kwargs["dtype"] = to_dtype.__name__
+
+        return TritonCodegen._COMPUTE_CODE_TEMPLATES[op_type].format(indent=space_indent, **kwargs)
+
+    def ReduceNode(self, node: ReduceNode, context: CodegenContext, indent: int):
+        space_indent = " " * indent
+        op_type = node.op_type
+        assert op_type == "ReduceSum" or op_type == "ReduceMax" or op_type == "ReduceMin"
+        # Support reduce on last axis only for now.
+        input_var_name = context.get_internal_variable_name(node.inputs[0].name)
+        output_var_name = context.get_internal_variable_name(node.outputs[0].name)
+        default_value = "0.0" if op_type == "ReduceSum" else ('float("-inf")' if op_type == "ReduceMax" else 'float("inf")')
+        code = f"{space_indent}{input_var_name} = tl.where(rmask, {input_var_name}, {default_value})\n"
+        triton_func = "sum" if op_type == "ReduceSum" else ("max" if op_type == "ReduceMax" else "min")
+        code += f"{space_indent}{output_var_name} = tl.{triton_func}({input_var_name}, 0)\n"
         return code
 
-    def ModuleNode(self, node: IRNode, var_context: CodeGenContext, indent: int):
+    def DropoutNode(self, node: DropoutNode, context: CodegenContext, indent: int):
+        space_indent = " " * indent
+        input_var_name = context.get_internal_variable_name(node.inputs[0].name)
+        p_var_name = context.get_internal_variable_name(node.inputs[1].name)
+        output_var_name = context.get_internal_variable_name(node.outputs[0].name)
+        mask_var_name = context.get_internal_variable_name(node.outputs[1].name) if len(node.outputs) >= 2 else "dropout_mask_output"
+        offset_str = f"{node.global_offset} + " if node.global_offset != sympy.Integer(0) else ""
+        offset_str += node.offset_node.codegen(self, context, indent).split("|")[0]
+        return (
+            f"{space_indent}p = 1 - {p_var_name}\n"
+            f"{space_indent}random = tl.rand(t_seed_cuda, {offset_str})\n"
+            f"{space_indent}{mask_var_name} = random < p\n"
+            f"{space_indent}{output_var_name} = tl.where({mask_var_name}, {input_var_name} / p, 0.0)\n"
+        )
+
+    def ModuleNode(self, node: ModuleNode, context: CodegenContext, indent: int):
         code = """
 import triton
 import triton.language as tl
 import torch
-from torch._C import _from_dlpack
-from torch.utils.dlpack import to_dlpack
+
 """
 
-        for idx, func in enumerate(node.body):
-            code += f"#the {idx}th function/sub_graph\n"
-            code += "@triton.jit\n"
-            code += func.code_gen(self, None, indent)
-        return code
+        for kernel_node in node.kernels:
+            code += kernel_node.codegen(self, CodegenContext(kernel_node.var_map), indent)
 
-    def ComputeNode(self, node: ComputeNode, var_context: CodeGenContext, indent: int):
-        def gen_cpp_code_for_op(var_context: CodeGenContext, space_indent: str):
-            var_map = var_context.var_map
-            vec_var_map = var_context.vectorized_var_set
-            ori_named_vars_i = [var_map[i.name] for i in node.input]
-            ori_named_vars_o = [var_map[i.name] for i in node.output]
-
-            named_vars_i = ori_named_vars_i.copy()
-            named_vars_o = ori_named_vars_o.copy()
-
-            for i in range(len(named_vars_i)):
-                # if named_vars_i[i] is constant scalar, just use it
-                if named_vars_i[i] in var_map:
-                    named_vars_i[i] = var_map[named_vars_i[i]][0]
-                if str(named_vars_i[i]) in vec_var_map:
-                    named_vars_i[i] = f"vec_{named_vars_i[i]}"
-
-            raw_named_vars_1 = named_vars_i[1] if len(named_vars_i) > 1 else None
-            if node.op_type == "Pow" and named_vars_i[1] == 0.5:
-                node.op_type_ = "Sqrt"
-
-            assert len(named_vars_i) in [1, 2, 3, 4]
-            # I don't think we can benefit too much if we decompose dropout into rand+less+div+where
-            # so currently, we just use the dropout op
-            assert len(named_vars_o) == 1 or node.op_type_ == "Dropout"
-
-            named_var_o = named_vars_o[0]
-            src_code = ""
-            if node.op_type == "Add":
-                src_code += f"{named_var_o} = {named_vars_i[0]} + ({named_vars_i[1]})\n"
-            elif node.op_type == "Sub":
-                src_code += f"{named_var_o} = {named_vars_i[0]} - ({named_vars_i[1]})\n"
-            elif node.op_type == "Div":
-                src_code += f"{named_var_o} = {named_vars_i[0]} / ({named_vars_i[1]})\n"
-            elif node.op_type == "Mul":
-                src_code += f"{named_var_o} = {named_vars_i[0]} * ({named_vars_i[1]})\n"
-            elif node.op_type == "Relu":
-                src_code += f"{named_var_o} = tl.maximum({named_vars_i[0]}, '0.f')\n"
-            elif node.op_type == "Pow":
-                # rewrite pow as mul
-                if raw_named_vars_1 == 2:
-                    src_code += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[0]}\n"
-                elif raw_named_vars_1 == 3:
-                    src_code += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[0]}* {named_vars_i[0]}\n"
-                else:
-                    src_code += f"{named_var_o} = tl.libdevice.pow({named_vars_i[0]}, {named_vars_i[1]})\n"
-            elif node.op_type == "Sqrt":
-                src_code += f"{named_var_o} = tl.sqrt({named_vars_i[0]})\n"
-            elif node.op_type == "Rsqrt":
-                if node.use_lib_device:
-                    src_code += f"{named_var_o} = tl.libdevice.rsqrt({named_vars_i[0]})\n"
-                else:
-                    src_code += f"{named_var_o} = 1.0/tl.sqrt({named_vars_i[0]})\n"
-            elif node.op_type == "Cast":
-                from_dtype = node.input[0].dtype
-                to_dtype = node.output[0].dtype.type
-                if from_dtype == to_dtype:
-                    src_code += f"{named_var_o} = {named_vars_i[0]}\n"
-                elif to_dtype == np.bool_:
-                    src_code += f"{named_var_o} = {named_vars_i[0]} != 0\n"
-                elif to_dtype == np.float32:
-                    src_code += f"{named_var_o} = ({named_vars_i[0]}).to(tl.float32)\n"
-                elif to_dtype == np.float16:
-                    src_code += f"{named_var_o} = ({named_vars_i[0]}).to(tl.float16)\n"
-                elif to_dtype == np.int64:
-                    src_code += f"{named_var_o} = ({named_vars_i[0]}).to(tl.int64)\n"
-                elif to_dtype == np.uint8:
-                    src_code += f"{named_var_o} = ({named_vars_i[0]}).to(tl.uint8)\n"
-                else:
-                    raise NotImplementedError(f"Cast to {to_dtype} is not supported")
-            elif node.op_type == "Erf":
-                src_code += f"{named_var_o} = tl.libdevice.erf({named_vars_i[0]})\n"
-            elif node.op_type == "Gelu":
-                src_code += f"{named_var_o} = (tl.libdevice.erf({named_vars_i[0]}/1.41421356237)+1.0)*0.5\n"
-            elif node.op_type == "Exp":
-                src_code += f"{named_var_o} = tl.exp({named_vars_i[0]})\n"
-            elif node.op_type == "Tanh":
-                src_code += f"{named_var_o} = tl.libdevice.tanh({named_vars_i[0]})\n"
-            elif node.op_type == "Where":
-                src_code += f"{named_var_o} = tl.where({named_vars_i[0]},{named_vars_i[1]},{named_vars_i[2]})\n"
-            elif node.op_type == "Sigmoid":
-                if node.use_lib_device:
-                    src_code += f"{named_var_o} = tl.libdevice.sigmoid({named_vars_i[0]})\n"
-                else:
-                    src_code += f"{named_var_o} = tl.sigmoid({named_vars_i[0]})\n"
-            elif node.op_type == "Log":
-                if node.use_lib_device:
-                    src_code += f"{named_var_o} = tl.libdevice.log({named_vars_i[0]})\n"
-                else:
-                    src_code += f"{named_var_o} = tl.log({named_vars_i[0]})\n"
-            elif node.op_type == "Dropout":
-                if len(named_vars_o) == 2:
-                    named_var_o_mask_out = named_vars_o[1]
-                else:
-                    named_var_o_mask_out = "mask_output"
-
-                # we would either decompose dropout or achieve mask here
-                non_mask_out = node.output[0]
-                if node.output[0].dtype.type == np.bool_:
-                    named_var_o, named_var_o_mask_out = named_var_o_mask_out, named_var_o
-                    non_mask_out = node.output[1]
-
-                annotated_out_var = Indexer().code_gen("roffset", non_mask_out)
-
-                if "seed" in node.attributes:
-                    seed = node.attributes["seed"]
-                else:
-                    import time
-
-                    seed = int(round(1000 * time.time()))
-                # workaround for triton, if we replace seed as constant value, it would be seen as constexpr
-                # has no attr, which leads to compile err
-                src_code += f"seed = {seed}\n"
-                src_code += space_indent + f"p = 1 - {named_vars_i[1]}\n"
-                src_code += space_indent + f"random = tl.rand(seed, {annotated_out_var})\n"
-                src_code += space_indent + f"{named_var_o_mask_out} = random < p\n"
-                src_code += (
-                    space_indent + f"{named_var_o} = tl.where({named_var_o_mask_out}, {named_vars_i[0]} / p, 0.0)\n"
-                )
-            elif node.op_type == "DropoutGrad":
-                src_code += f"p = 1 - {named_vars_i[2]}\n"
-                src_code += space_indent + f"{named_var_o} = tl.where({named_vars_i[1]}, {named_vars_i[0]} / p, 0.0)\n"
-            elif node.op_type == "Identity":
-                src_code += f"{named_var_o} = {named_vars_i[0]}\n"
-            else:
-                raise Exception(f"not supported {node.op_type}")
-            return src_code
+        input_args = ", ".join([context.get_variable_name(input.name) for input in node.inputs])
 
         space_indent = " " * indent
-        src_code = space_indent + f"# {node.op_name} {node.op_type}\n"
-        src_code += space_indent + gen_cpp_code_for_op(var_context, space_indent)
-        return src_code
+        code += f"\n\n{space_indent}def {node.func_name}({input_args}):\n"
 
-    def ReduceNode(self, node: ReduceNode, var_context: CodeGenContext, indent: int):
-        var_map = var_context.var_map
-        vec_var_map = var_context.vectorized_var_set
-        code = ""
-        input_key = [i.name for i in node.input]
-        output_key = [i.name for i in node.output]
-        try:
-            input_1 = var_map[var_map[input_key[1]]]
-        except BaseException:
-            input_1 = np.array([np.NaN])
-            pass
-        assert len(input_key) == 1 or (input_1[0] != np.NaN).all()
-        named_var_i = var_map[input_key[0]]
-        named_var_o = var_map[output_key[0]]
-        # this var is vectorized, add prefix 'vec_'
-        assert node.vectorization, "ReduceNode in triton must be vectorized"
-        if named_var_o in vec_var_map:
-            named_var_o = "vec_" + named_var_o
-        if named_var_i in vec_var_map:
-            named_var_i = "vec_" + named_var_i
-        if named_var_i != input_key[0]:
-            code += " " * indent + f"# {named_var_i} = {input_key[0]}\n"
-            code += " " * indent + f"# {named_var_o} = {output_key[0]}\n"
+        indent += 4
+        space_indent = " " * indent
 
-        # FIXME, shouldn't use is_final
-        if node.is_final:
-            default_value = "0.0" if node.body.op_type == "ReduceSum" else 'float("-inf")'
-            default_value = default_value if node.body.op_type != "ReduceMin" else 'float("inf")'
-            code += " " * indent + f"{named_var_i} = tl.where(triton_rmask, {named_var_i}, {default_value})\n"
-            if node.body.op_type == "ReduceSum":
-                code += " " * indent + f"{named_var_o} = tl.sum({named_var_i}, 0)\n"
-            elif node.body.op_type == "ReduceMax":
-                code += " " * indent + f"{named_var_o} = tl.max({named_var_i}, 0)\n"
-            elif node.body.op_type == "ReduceMin":
-                code += " " * indent + f"{named_var_o} = tl.min({named_var_i}, 0)\n"
-            else:
-                raise Exception(f"not supported {node.body.op_type}")
+        # Allocate output tensor.
+        for output in node.outputs:
+            torch_dtype = torch.from_numpy(np.zeros(1, dtype=output.dtype)).dtype
+            # Workaround for DLPack which doesn't support bool.
+            if torch_dtype == torch.bool:
+                torch_dtype = torch.uint8
+            code += f"{space_indent}{context.get_variable_name(output.name)} = torch.empty({tuple(output.shape)}, dtype={torch_dtype}, device='cuda')\n"
+
+        if node.has_dropout:
+            code += f"\n{space_indent}seed_cuda = torch.randint(2**31, size=(), dtype=torch.int64, device='cuda')\n"
+
+        # TODO: support multiple blocks.
+        assert len(node.kernels) == 1
+        kernel_args_str = ", ".join([context.get_variable_name(input.name) for input in node.kernels[0].inputs])
+        if kernel_args_str != "":
+            kernel_args_str += ", "
+        kernel_args_str += ", ".join([context.get_variable_name(output.name) for output in node.kernels[0].outputs])
+        # TODO: support other kinds of variable args, such as symbolic shape variable.
+        if node.kernels[0].has_dropout:
+            kernel_args_str += ", seed_cuda"
+
+        if isinstance(node.kernels[0], ReduceKernelNode):
+            target_shape = node.kernels[0].target_tensor_info.shape
+            last_dim = target_shape[-1]
+            code += f"""
+{space_indent}n_last_dim = {last_dim}
+{space_indent}paralleled_blocks = {np.prod(target_shape) // last_dim}
+{space_indent}{node.kernels[0].name}[(paralleled_blocks,)]({kernel_args_str}, RBLOCK={("1024" if node.kernels[0].recompute else "triton.next_power_of_2(n_last_dim)")})
+"""
         else:
-            if node.body.op_type == "ReduceSum":
-                code += " " * indent + f"{named_var_o} += {named_var_i}\n"
-            elif node.body.op_type == "ReduceMax":
-                code += (
-                    " " * indent
-                    + f"{named_var_o} = tl.where(({named_var_o} < {named_var_i}), {named_var_i}, {named_var_o})\n"
-                )
-            elif node.body.op_type == "ReduceMin":
-                code += (
-                    " " * indent
-                    + f"{named_var_o} = tl.where(({named_var_o} > {named_var_i}), {named_var_i}, {named_var_o})\n"
-                )
-            else:
-                raise Exception(f"not supported {node.body.op_type}")
+            code += f"""
+{space_indent}n_elements = {np.prod(node.kernels[0].target_tensor_info.shape)}
+{space_indent}grid = lambda meta: (triton.cdiv(n_elements, meta['XBLOCK']),)
+{space_indent}{node.kernels[0].name}[grid]({kernel_args_str}, XBLOCK=1024)
+"""
+
+        return_output_str = ", ".join([context.get_variable_name(output.name) for output in node.outputs])
+        code += f"{space_indent}return {return_output_str}\n"
         return code
 
-    def MaskLoadNode(self, node: MaskLoadNode, var_context: CodeGenContext, indent: int):
-        var_map = var_context.var_map
-        vec_var_map = var_context.vectorized_var_set
-        space_indent = " " * indent
-        code = ""
-        var_name, mask_name = (i.name for i in node.input)
-        input_buf: ComputeBuffer = node.input[0]
-        assert var_name in var_map, f"name {var_name} not found in var_map"
-        named_var = var_map[var_name]
 
-        assert node.vectorization, "LoadNode should be vectorized in triton"
-
-        if named_var != var_name:
-            code += space_indent + f"#load  {var_name} ===>> {named_var}\n"
-        annotated_var = Indexer().code_gen(named_var, input_buf)
-
-        load_addr = f"e_{annotated_var}"
-        vec_var_map.add(named_var)
-
-        if input_buf.attr_cross_loop:
-            return (
-                code
-                + space_indent
-                + f"vec_{named_var} = {load_addr}[i_0*{SpecialVar().rblock}:(i_0+1)*{SpecialVar().rblock}]\n"
-            )
-
-        if input_buf.shape == [] or input_buf.shape[-1] == 1:
-            mask_and_other = ""
-        else:
-            # code += space_indent + f"roffset = {rbase} # + offset\n"
-            # code += space_indent + f"{mask_name} = roffset < tl.minimum({SpecialVar().rblock},{input_buf.shape[-1]})\n"
-            mask_name = "triton_rmask"
-            load_addr = f"{load_addr}+roffset"
-            mask_and_other = f"{mask_name}, other=0.0"
-        return code + space_indent + f"vec_{named_var} = tl.load({load_addr},{mask_and_other} )\n"
-
-    def MaskStoreNode(self, node: MaskStoreNode, var_context: CodeGenContext, indent: int):
-        var_map = var_context.var_map
-        code = ""
-        space_indent = code + " " * indent
-        var_name, mask_name = (i.name for i in node.input)
-        input_buf = node.input[0]
-        assert var_name in var_map
-        named_var = var_map[var_name]
-
-        if named_var != var_name:
-            code += " " * indent + f"# store {var_name} <<=== {named_var}\n"
-        annotated_var = Indexer().code_gen(named_var, input_buf)
-        assert node.vectorization, "StoreNode should be vectorized in triton"
-        rbase = var_map[SpecialVar().rbase]
-
-        if input_buf.attr_cross_loop:
-            return (
-                code
-                + space_indent
-                + f"e_{annotated_var}[i_0*{SpecialVar().rblock}:(i_0+1)*{SpecialVar().rblock}] = {named_var}\n"
-            )
-        if input_buf.shape == [] or input_buf.shape[-1] == 1:
-            return code + space_indent + f"tl.store(e_{annotated_var}, {named_var})\n"
-        code += space_indent + f"roffset = {rbase} # + offset\n"
-        # code += space_indent + f"{mask_name} = roffset <  tl.minimum({SpecialVar().rblock},{input_buf.shape[-1]})\n"
-        mask_name = "triton_rmask"
-        return code + (space_indent + f"tl.store(e_{annotated_var}+roffset, {named_var}, {mask_name})\n")
-
-    def ExecutionBlock(self, node: ExecutionBlock, var_context: CodeGenContext, indent: int):
-        assert not var_context
-        var_context = CodeGenContext(node.var_map)
-        var_map = var_context.var_map
-        need_indent = " " * indent
-        src_code = ""
-
-        dec_for_sub_loop = ""
-        var_declared = set()
-        # this loop won't be true until triton support slice store.
-        if node.forward_var_map_list:
-            for idx in range(len(node.forward_var_map_list)):
-                cur_forward_var_map = node.forward_var_map_list[idx]
-                for str_var in list(cur_forward_var_map.keys()):
-                    buffer_l = cur_forward_var_map[str_var]
-                    assert len(buffer_l) == 1 if isinstance(buffer_l, list) else True
-                    buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
-                    if buffer.shape[-1] == 1:
-                        continue
-                    if str_var in var_declared:
-                        cur_forward_var_map.pop(str_var)
-                        continue
-                    var_declared.add(str_var)
-                    if not node.recompute:
-                        initialize_assign = f"= tl.zeros([tl.cdiv({buffer.shape[-1]},{SpecialVar().rblock})*{SpecialVar().rblock}], dtype=tl.{buffer.dtype.name})"
-                        dec_for_sub_loop += need_indent + f"e_{var_map[str_var]} {initialize_assign}\n"
-                    cur_forward_var_map.pop(str_var)
-            dec_for_sub_loop += "\n"
-        src_code += dec_for_sub_loop
-        src_code += node.body.code_gen(self, var_context, indent)
-        return src_code
-
-
-def _init_hardware_context():
-    return HardwareContext(1024)
-
-
-def codegen(models_with_name: Dict[str, SortedGraph]) -> str:
-    module = ModuleNode(models_with_name)
-    graph_lower = GraphLowering()
-    hardware_context = _init_hardware_context()
-    module.lower(graph_lower, hardware_context)
-    visitor = TritonCodeGen()
-    return module.code_gen(visitor, CodeGenContext({}))
+def codegen(func_name: str, sorted_graph: SortedGraph) -> str:
+    module_node = lower(func_name, sorted_graph)
+    return module_node.codegen(TritonCodegen(), CodegenContext(module_node.var_map))

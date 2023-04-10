@@ -3,47 +3,13 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-import os
+import re
 import uuid
 from collections import defaultdict
-from pathlib import Path
-from typing import List, Union
+from typing import List
 
-from onnx import NodeProto, ValueInfoProto
-
-from onnxruntime.tools.symbolic_shape_infer import get_elem_type_from_type_proto, get_shape_from_value_info
-
-from ._common import TENSOR_TYPE_TO_NP_TYPE
-from ._ir import ComputeBuffer
-from ._sympy_utils import sympy_symbol
-
-
-class DirContext(object):
-    def __init__(self, build_dir: Path):
-        self.cur_dir = None
-        self.build_dir = build_dir
-
-    def __enter__(self):
-        self.cur_dir = Path(".").resolve()
-        os.chdir(path=self.build_dir)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        os.chdir(path=self.cur_dir)
-
-
-def convert_onnx_value_to_computebuffer(tensors: Union[ValueInfoProto, List[ValueInfoProto]], prefix=""):
-    not_list = False
-    if not isinstance(tensors, list):
-        not_list = True
-        tensors = [tensors]
-    bufs = []
-    for tensor in tensors:
-        dtype = TENSOR_TYPE_TO_NP_TYPE[get_elem_type_from_type_proto(tensor.type)]
-        shape = get_shape_from_value_info(tensor)
-        shape = sympy_symbol(shape)
-        bufs.append(ComputeBuffer(prefix + tensor.name, dtype, shape))
-    return bufs if not_list == False else bufs[0]
+import numpy as np
+from onnx import NodeProto, TensorProto, helper, numpy_helper
 
 
 def gen_unique_name(prefix: str) -> str:
@@ -93,3 +59,67 @@ def topological_sort(inputs: List[str], nodes: List[NodeProto]) -> List[NodeProt
                 _topological_soft_internal(node, visited, output_consumers, sorted_nodes)
 
     return const_nodes + sorted_nodes
+
+
+def get_attribute(node, attr_name, default_value=None):
+    found = [attr for attr in node.attribute if attr.name == attr_name]
+    if found:
+        return helper.get_attribute_value(found[0])
+    return default_value
+
+
+def to_numpy_array(node):
+    tensor = node
+    if isinstance(node, NodeProto):
+        tensor = get_attribute(node, "value")
+    return numpy_helper.to_array(tensor)
+
+
+_TENSOR_TYPE_TO_NP_TYPE = {
+    int(TensorProto.FLOAT): np.dtype("float32"),
+    int(TensorProto.UINT8): np.dtype("uint8"),
+    int(TensorProto.INT8): np.dtype("int8"),
+    int(TensorProto.UINT16): np.dtype("uint16"),
+    int(TensorProto.INT16): np.dtype("int16"),
+    int(TensorProto.INT32): np.dtype("int32"),
+    int(TensorProto.INT64): np.dtype("int64"),
+    int(TensorProto.BOOL): np.dtype("bool"),
+    int(TensorProto.FLOAT16): np.dtype("float16"),
+    # Native numpy does not support bfloat16 so now use float32 for bf16 values
+    int(TensorProto.BFLOAT16): np.dtype("float32"),
+    int(TensorProto.DOUBLE): np.dtype("float64"),
+    int(TensorProto.COMPLEX64): np.dtype("complex64"),
+    int(TensorProto.COMPLEX128): np.dtype("complex128"),
+    int(TensorProto.UINT32): np.dtype("uint32"),
+    int(TensorProto.UINT64): np.dtype("uint64"),
+    int(TensorProto.STRING): np.dtype("object"),
+}
+
+
+def to_numpy_type(tensor_type) -> np.dtype:
+    return _TENSOR_TYPE_TO_NP_TYPE[tensor_type] if not isinstance(tensor_type, np.dtype) else tensor_type
+
+
+def gen_variable_name(name: str, prefix: str, existing_names: set):
+    pos = name.rfind("/")
+    if pos != -1:
+        name = name[pos + 1:]
+    pos = name.rfind(".")
+    if pos != -1:
+        name = name[pos + 1:]
+    name = re.sub(r"[^a-zA-Z0-9]", "_", name)
+    if len(name) > 20:
+        name = name[-20:]
+
+    name = f"{prefix}_{name}"
+    while name in existing_names:
+        name = name + "_1"
+
+    existing_names.add(name)
+    return name
+
+
+def may_add_brackets(name: str) -> str:
+    if not re.match("^[A-Za-z0-9_.]*$", name):
+        return f"({name})"
+    return name

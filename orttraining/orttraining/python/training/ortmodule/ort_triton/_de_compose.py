@@ -8,6 +8,8 @@
 import numpy as np
 from onnx import NodeProto, TensorProto, helper
 
+from ._utils import get_attribute
+
 
 # TODO: share constants.
 class DecomposeDispatch(object):
@@ -41,13 +43,12 @@ class DecomposeDispatch(object):
         output = node.output[0]
         mean_output = node.output[1] if len(node.output) > 1 else None
         inv_std_dev_output = node.output[2] if len(node.output) > 2 else None
-        attr = {i.name: i.i or i.f for i in node.attribute}
 
         epsilon_tensor = helper.make_tensor(
             name="epsilon_const",
             data_type=TensorProto.FLOAT if is_half else input_type,
             dims=(1,),
-            vals=np.array([attr["epsilon"]]),
+            vals=np.array([get_attribute(node, "epsilon", 1e-05)]),
         )
 
         const_out, const_node = self._new_node("Constant", [], f"{node.name}_const", value=epsilon_tensor)

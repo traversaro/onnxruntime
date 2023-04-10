@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import sys
+import traceback
 from types import ModuleType
 from typing import List, Tuple
 
@@ -28,8 +29,8 @@ _DEBUG_MODE = ortmodule._defined_from_envvar("ORTMODULE_TRITON_DEBUG", 0) != 0
 
 @functools.lru_cache(None)
 def _gen_module(sorted_graph: SortedGraph) -> Tuple[str, str, ModuleType]:
-    func_name = gen_unique_name("triton_kernel")
-    src_code = codegen({func_name: sorted_graph})
+    func_name = gen_unique_name("call")
+    src_code = codegen(func_name, sorted_graph)
     return func_name, src_code, PyCodeCache().load(src_code)
 
 
@@ -42,10 +43,10 @@ class ModuleCache:
         key = hash(f"{onnx_key}|{str(shapes).replace(' ', '')}") % (10**8)
         if key not in cls.cache:
             model = onnx.load_model_from_string(onnx_str)
-            sorted_graph = SortedGraph(model, [sympy_symbol(shape) for shape in shapes])
+            sorted_graph = SortedGraph(model, [[sympy_symbol(dim) for dim in shape] for shape in shapes])
             func_name, src_code, mod = _gen_module(sorted_graph)
             if _DEBUG_MODE:
-                file_name = f"{func_name[14:]}_{onnx_key}"
+                file_name = f"{func_name}_{onnx_key}"
                 py_file_path = f"triton_debug/{file_name}.py"
                 os.makedirs(os.path.dirname(py_file_path), exist_ok=True)
                 with open(py_file_path, "w") as f:
@@ -61,25 +62,19 @@ def get_config() -> str:
 
 
 def execute_triton_op(func_name: str, onnx_key: int, onnx_str: bytes, *tensors):
-    torch_tensors = [_from_dlpack(tensor) for tensor in tensors]
-    if not onnx_str:
-        assert func_name
-        func = getattr(sys.modules[".".join(__name__.split(".")[:-1])], func_name)
-        output = func(*torch_tensors)
-        if isinstance(output, tuple):
-            return tuple([to_dlpack(tensor) for tensor in output])
-        return to_dlpack(output)
-
     try:
-        concrete_shapes = [list(tensor.size()) for tensor in torch_tensors]
-        func_name, mod = ModuleCache.load(onnx_key, onnx_str, concrete_shapes)
-        func = getattr(mod, f"launch_{func_name}")
-        outputs = func(torch_tensors)
+        torch_tensors = [_from_dlpack(tensor) for tensor in tensors]
+        if not onnx_str:
+            assert func_name
+            func = getattr(sys.modules[".".join(__name__.split(".")[:-1])], func_name)
+        else:
+            concrete_shapes = [list(tensor.size()) for tensor in torch_tensors]
+            func_name, mod = ModuleCache.load(onnx_key, onnx_str, concrete_shapes)
+            func = getattr(mod, func_name)
+        output = func(*torch_tensors)
     except Exception as e:
-        import traceback
-
         traceback.print_exc()
         raise e
-    if len(outputs) == 1:
-        return to_dlpack(outputs[0])
-    return tuple([to_dlpack(output) for output in outputs])
+    if isinstance(output, tuple):
+        return tuple([to_dlpack(tensor) for tensor in output])
+    return to_dlpack(output)

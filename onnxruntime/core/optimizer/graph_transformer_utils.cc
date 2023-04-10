@@ -309,7 +309,7 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
       transformers.emplace_back(std::make_unique<FastGeluFusion>(cpu_cuda_rocm_eps));
       transformers.emplace_back(std::make_unique<QuickGeluFusion>(cpu_cuda_rocm_eps));
 
-      transformers.emplace_back(std::make_unique<MatMulScaleFusion>(cpu_cuda_dml_rocm_eps));
+      // transformers.emplace_back(std::make_unique<MatMulScaleFusion>(cpu_cuda_dml_rocm_eps));
 
       // GeluApproximation has side effects which may change results. It needs to be manually enabled,
       // or alternatively the model can be updated offline using a model conversion script
