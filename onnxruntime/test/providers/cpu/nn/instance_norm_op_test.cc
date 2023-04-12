@@ -44,7 +44,7 @@ TEST(InstanceNormalizationOpTest, InstanceNorm) {
 #if defined(OPENVINO_CONFIG_MYRIAD)  //Disabling this test on MYRIADX temporarily due to a bug
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kOpenVINOExecutionProvider});
 #else
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+  test.Run();
 #endif
 }
 

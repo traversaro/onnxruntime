@@ -431,34 +431,6 @@ TEST_P(ModelTest, Run) {
     broken_tests.insert({"softmax_cross_entropy_sum_log_prob_expanded", "Shape mismatch"});
   }
 
-  if (provider_name == "tensorrt") {
-    broken_tests.insert({"convtranspose_with_kernel", "It causes segmentation fault"});
-    broken_tests.insert({"convtranspose_pad", "It causes segmentation fault"});
-    broken_tests.insert({"convtranspose_kernel_shape", "It causes segmentation fault"});
-    broken_tests.insert({"dynamicquantizelinear_expanded", "It causes segmentation fault"});
-    broken_tests.insert({"dynamicquantizelinear_min_adjusted_expanded", "It causes segmentation fault"});
-    broken_tests.insert({"dynamicquantizelinear_max_adjusted_expanded", "It causes segmentation fault"});
-
-    broken_tests.insert({"basic_conv_with_padding",
-                         "Cannot set more than one input unless network has Q/DQ layers. TensorRT EP could not build "
-                         "engine for fused node"});
-    broken_tests.insert({"basic_conv_without_padding",
-                         "Cannot set more than one input unless network has Q/DQ layers. TensorRT EP could not build "
-                         "engine for fused node"});
-    broken_tests.insert({"conv_with_strides_no_padding",
-                         "Cannot set more than one input unless network has Q/DQ layers. TensorRT EP could not build "
-                         "engine for fused node"});
-
-    broken_tests.insert({"conv_with_autopad_same",
-                         "Internal Error (node_of_y: Cannot set more than one input unless network has Q/DQ layers.)"});
-
-    // sce op is not supported
-    broken_tests_keyword_set.insert({"sce"});
-
-    // TensorRT EP CI uses Nvidia Tesla M60 which doesn't support fp16.
-    broken_tests_keyword_set.insert({"FLOAT16"});
-  }
-
   if (provider_name == "dml") {
     broken_tests.insert({"tinyyolov3", "The parameter is incorrect"});
     broken_tests.insert({"PixelShuffle", "Test requires 6D Reshape, which isn't supported by DirectML"});
@@ -1028,39 +1000,7 @@ TEST_P(ModelTest, Run) {
                                                    ORT_TSTR("maxpool_2d_uint8"),
                                                    ORT_TSTR("mul_uint8"),
                                                    ORT_TSTR("div_uint8")};
-  static const ORTCHAR_T* tensorrt_disabled_tests[] = {
-      ORT_TSTR("udnie"),
-      ORT_TSTR("rain_princess"),
-      ORT_TSTR("pointilism"),
-      ORT_TSTR("mosaic"),
-      ORT_TSTR("LSTM_Seq_lens_unpacked"),
-      ORT_TSTR("cgan"),
-      ORT_TSTR("candy"),
-      ORT_TSTR("tinyyolov3"),
-      ORT_TSTR("yolov3"),
-      ORT_TSTR("mlperf_ssd_resnet34_1200"),
-      ORT_TSTR("mlperf_ssd_mobilenet_300"),
-      ORT_TSTR("mask_rcnn"),
-      ORT_TSTR("faster_rcnn"),
-      ORT_TSTR("fp16_shufflenet"),
-      ORT_TSTR("fp16_inception_v1"),
-      ORT_TSTR("fp16_tiny_yolov2"),
-      ORT_TSTR("tf_inception_v3"),
-      ORT_TSTR("tf_mobilenet_v1_1.0_224"),
-      ORT_TSTR("tf_mobilenet_v2_1.0_224"),
-      ORT_TSTR("tf_mobilenet_v2_1.4_224"),
-      ORT_TSTR("tf_resnet_v1_101"),
-      ORT_TSTR("tf_resnet_v1_152"),
-      ORT_TSTR("tf_resnet_v1_50"),
-      ORT_TSTR("tf_resnet_v2_101"),
-      ORT_TSTR("tf_resnet_v2_152"),
-      ORT_TSTR("tf_resnet_v2_50"),
-      ORT_TSTR("convtranspose_1d"),
-      ORT_TSTR("convtranspose_3d"),
-      ORT_TSTR("conv_with_strides_and_asymmetric_padding"),
-      ORT_TSTR("conv_with_strides_padding"),
-      ORT_TSTR("size")  // INVALID_ARGUMENT: Cannot find binding of given name: x
-  };
+
   for (const ORTCHAR_T* provider_name : provider_names) {
     std::unordered_set<std::basic_string<ORTCHAR_T>> all_disabled_tests(std::begin(immutable_broken_tests),
                                                                         std::end(immutable_broken_tests));
@@ -1072,10 +1012,6 @@ TEST_P(ModelTest, Run) {
       // these models run but disabled tests to keep memory utilization low
       // This will be removed after LRU implementation
       all_disabled_tests.insert(std::begin(dnnl_disabled_tests), std::end(dnnl_disabled_tests));
-    } else if (CompareCString(provider_name, ORT_TSTR("tensorrt")) == 0) {
-      // these models run but disabled tests to keep memory utilization low
-      // This will be removed after LRU implementation
-      all_disabled_tests.insert(std::begin(tensorrt_disabled_tests), std::end(tensorrt_disabled_tests));
     } else if (CompareCString(provider_name, ORT_TSTR("openvino")) == 0) {
       // these models run but disabled tests to keep memory utilization low
       // This will be removed after LRU implementation
