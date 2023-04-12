@@ -21,7 +21,7 @@ from ._codecache import PyCodeCache
 from ._codegen import codegen
 from ._op_config import get_supported_ops
 from ._sorted_graph import SortedGraph
-from ._sympy_utils import sympy_symbol
+from ._sympy_utils import parse_shape
 from ._utils import gen_unique_name
 
 _DEBUG_MODE = ortmodule._defined_from_envvar("ORTMODULE_TRITON_DEBUG", 0) != 0
@@ -43,7 +43,7 @@ class ModuleCache:
         key = hash(f"{onnx_key}|{str(shapes).replace(' ', '')}") % (10**8)
         if key not in cls.cache:
             model = onnx.load_model_from_string(onnx_str)
-            sorted_graph = SortedGraph(model, [[sympy_symbol(dim) for dim in shape] for shape in shapes])
+            sorted_graph = SortedGraph(model, [parse_shape(shape) for shape in shapes])
             func_name, src_code, mod = _gen_module(sorted_graph)
             if _DEBUG_MODE:
                 file_name = f"{func_name}_{onnx_key}"

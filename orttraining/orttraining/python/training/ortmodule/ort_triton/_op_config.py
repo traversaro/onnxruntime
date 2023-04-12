@@ -38,16 +38,16 @@ _REDUCTION_OPS = {
 }
 
 
-def _contains(node_or_op_type, ops):
+def _contains(node_or_op_type, ops) -> bool:
     op_type = node_or_op_type.op_type if isinstance(node_or_op_type, NodeProto) else node_or_op_type
     return isinstance(op_type, str) and op_type in ops
 
 
-def is_elementwise_node(node_or_op_type):
+def is_elementwise_node(node_or_op_type) -> bool:
     return _contains(node_or_op_type, _ELEMENTWISE_OPS)
 
 
-def is_reduction_node(node_or_op_type):
+def is_reduction_node(node_or_op_type) -> bool:
     return _contains(node_or_op_type, _REDUCTION_OPS)
 
 

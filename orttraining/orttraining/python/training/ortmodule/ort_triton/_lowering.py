@@ -6,7 +6,6 @@
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
-import sympy
 from onnx import NodeProto
 
 from ._common import TensorInfo
@@ -69,11 +68,6 @@ def _get_node_io(
     return input_args, output_args
 
 
-def _create_load_or_store(tensor_arg: TensorArg, kernel_node: KernelNode, is_load: bool):
-    is_reduction = isinstance(kernel_node, ReduceKernelNode)
-    return IONode(tensor_arg, kernel_node.target_tensor_info.shape, is_reduction, is_load)
-
-
 def _insert_load_and_store(kernel_node: KernelNode):
     input_name_map = [input.name for input in kernel_node.inputs]
     output_name_map = [output.name for output in kernel_node.outputs]
@@ -85,12 +79,12 @@ def _insert_load_and_store(kernel_node: KernelNode):
                 if (input.data is not None and input.data.size == 1) or input.name in load_cache:
                     continue
                 load_cache.add(input.name)
-                new_sub_nodes.append(_create_load_or_store(input, kernel_node, True))
+                new_sub_nodes.append(IONode(input, kernel_node.offset_calc, True))
         new_sub_nodes.append(node)
         for output in node.outputs:
             if output.name in output_name_map:
                 load_cache.add(output.name)
-                new_sub_nodes.append(_create_load_or_store(output, kernel_node, False))
+                new_sub_nodes.append(IONode(output, kernel_node.offset_calc, False))
     kernel_node.sub_nodes = new_sub_nodes
 
 
@@ -144,12 +138,6 @@ def _analyze_io(
         kernel_node.constants[arg.name] = arg
 
     _insert_load_and_store(kernel_node)
-    for node in kernel_node.sub_nodes:
-        if node.has_offset_node:
-            assert hasattr(node, "offset_node")
-            for idx, dim in enumerate(node.offset_node.strides):
-                if dim != sympy.Integer(0):
-                    kernel_node.dims_offset_compute.add(idx)
     kernel_node.gen_variable_names()
 
 
@@ -167,22 +155,23 @@ def _lower(sorted_graph: SortedGraph) -> Tuple[List[TensorArg], List[TensorArg],
     for group in grouped_nodes:
         is_reduction_kernel = any(is_reduction_node(node) for node in group)
         # TODO: it's possible that the last node's first output's shape is not the final output shape.
-        target_tensor_info = sorted_graph.node_arg_infos[group[-1].output[0]]
-        kernel_nodes.append(
-            ReduceKernelNode([], [], target_tensor_info)
+        target_shape = sorted_graph.node_arg_infos[group[-1].output[0]].shape
+        # Support reducing on last dim only for now.
+        # The inputs and outputs will be initialized later.
+        kernel_node = (
+            ReduceKernelNode([], [], target_shape, -1)
             if is_reduction_kernel
-            else ElementwiseKernelNode([], [], target_tensor_info)
+            else ElementwiseKernelNode([], [], target_shape)
         )
+        kernel_nodes.append(kernel_node)
         sub_nodes = []
         for node in group:
             node_inputs, node_outputs = _get_node_io(node, arg_cache, sorted_graph.node_arg_infos)
             if node.op_type == "Dropout":
-                sub_nodes.append(
-                    DropoutNode(node, node_inputs, node_outputs, target_tensor_info.shape, is_reduction_kernel)
-                )
+                sub_nodes.append(DropoutNode(node, node_inputs, node_outputs, kernel_node.offset_calc))
                 kernel_nodes[-1].has_dropout = True
             elif is_reduction_node(node):
-                sub_nodes.append(ReduceNode(node, node_inputs, node_outputs))
+                sub_nodes.append(ReduceNode(node, node_inputs, node_outputs, kernel_node.offset_calc.recompute))
             else:
                 sub_nodes.append(ComputeNode(node, node_inputs, node_outputs))
         kernel_nodes[-1].sub_nodes = sub_nodes

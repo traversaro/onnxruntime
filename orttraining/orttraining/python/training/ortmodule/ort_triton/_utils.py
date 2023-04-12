@@ -6,7 +6,7 @@
 import re
 import uuid
 from collections import defaultdict
-from typing import List
+from typing import Any, List
 
 import numpy as np
 from onnx import NodeProto, TensorProto, helper, numpy_helper
@@ -61,17 +61,18 @@ def topological_sort(inputs: List[str], nodes: List[NodeProto]) -> List[NodeProt
     return const_nodes + sorted_nodes
 
 
-def get_attribute(node, attr_name, default_value=None):
+def get_attribute(node: NodeProto, attr_name: str, default_value: Any = None) -> Any:
     found = [attr for attr in node.attribute if attr.name == attr_name]
     if found:
         return helper.get_attribute_value(found[0])
     return default_value
 
 
-def to_numpy_array(node):
+def to_numpy_array(node: Any) -> np.ndarray:
     tensor = node
     if isinstance(node, NodeProto):
         tensor = get_attribute(node, "value")
+    assert isinstance(tensor, TensorProto)
     return numpy_helper.to_array(tensor)
 
 
@@ -96,17 +97,17 @@ _TENSOR_TYPE_TO_NP_TYPE = {
 }
 
 
-def to_numpy_type(tensor_type) -> np.dtype:
+def to_numpy_type(tensor_type: TensorProto.DataType) -> np.dtype:
     return _TENSOR_TYPE_TO_NP_TYPE[tensor_type] if not isinstance(tensor_type, np.dtype) else tensor_type
 
 
-def gen_variable_name(name: str, prefix: str, existing_names: set):
+def gen_variable_name(name: str, prefix: str, existing_names: set) -> str:
     pos = name.rfind("/")
     if pos != -1:
-        name = name[pos + 1:]
+        name = name[pos + 1 :]
     pos = name.rfind(".")
     if pos != -1:
-        name = name[pos + 1:]
+        name = name[pos + 1 :]
     name = re.sub(r"[^a-zA-Z0-9]", "_", name)
     if len(name) > 20:
         name = name[-20:]

@@ -4,11 +4,12 @@
 # --------------------------------------------------------------------------
 
 import copy
-from typing import List
+import itertools
+from typing import Any, Dict, List
 
 import numpy as np
 import onnx
-from onnx import ModelProto
+from onnx import GraphProto, ModelProto, NodeProto, helper
 
 from ._common import TensorInfo, TypeAndShapeInfer
 from ._de_compose import DecomposeDispatch
@@ -16,15 +17,15 @@ from ._utils import get_attribute, to_numpy_array, topological_sort
 
 
 class SortedGraph(object):
-    def __init__(self, model: ModelProto, input_shapes: List[List]):
-        self._model = model
-        self._graph = model.graph
-        self._input_shapes = input_shapes
-        self._sorted_nodes = topological_sort(
+    def __init__(self, model: ModelProto, input_shapes: List[List[Any]]):
+        self._model: ModelProto = model
+        self._graph: GraphProto = model.graph
+        self._input_shapes: List[List[Any]] = input_shapes
+        self._sorted_nodes: List[NodeProto] = topological_sort(
             [input.name for input in self._graph.input] + [initializer.name for initializer in self._graph.initializer],
             self._graph.node,
         )
-        self._node_arg_infos = {}
+        self._node_arg_infos: Dict[str, TensorInfo] = {}
 
         for idx, input in enumerate(self._graph.input):
             self._node_arg_infos[input.name] = TensorInfo(input.type.tensor_type.elem_type, self._input_shapes[idx])
@@ -39,15 +40,15 @@ class SortedGraph(object):
         initializers = {}
         for initializer in self._graph.initializer:
             initializers[initializer.name] = initializer
-        self._sorted_initializers = []
+        self._sorted_initializers: List[TensorInfo] = []
         for node in self._sorted_nodes:
             for input in node.input:
                 if input in initializers:
                     self._sorted_initializers.append(initializers[input])
                     initializers.pop(input)
 
-        self._const_nodes = [node for node in self._sorted_nodes if node.op_type == "Constant"]
-        self._sorted_nodes = [node for node in self._sorted_nodes if node.op_type != "Constant"]
+        self._const_nodes: List[NodeProto] = [node for node in self._sorted_nodes if node.op_type == "Constant"]
+        self._sorted_nodes: List[NodeProto] = [node for node in self._sorted_nodes if node.op_type != "Constant"]
 
     def __str__(self):
         graph_inputs = []
@@ -59,18 +60,12 @@ class SortedGraph(object):
         graph_inputs_str = ",".join(graph_inputs)
         constants = []
         for idx, initializer in enumerate(self._sorted_initializers):
-            data_str = (
-                np.array2string(to_numpy_array(initializer), separator=",").replace("\n", "").replace(" ", "")
-            )
+            data_str = np.array2string(to_numpy_array(initializer), separator=",").replace("\n", "").replace(" ", "")
             constants.append(f"({initializer.data_type},{data_str})")
             name_map[initializer.name] = f"c{idx}"
         for idx, node in enumerate(self._const_nodes):
             value_attr = get_attribute(node, "value")
-            data_str = (
-                np.array2string(to_numpy_array(value_attr), separator=",")
-                .replace("\n", "")
-                .replace(" ", "")
-            )
+            data_str = np.array2string(to_numpy_array(value_attr), separator=",").replace("\n", "").replace(" ", "")
             constants.append(f"({value_attr.data_type},{data_str})")
             name_map[node.output[0]] = f"c{idx + len(self._sorted_initializers)}"
         constants_str = ",".join(constants)
@@ -106,19 +101,19 @@ class SortedGraph(object):
         return str(self) == str(other)
 
     @property
-    def const_nodes(self):
+    def const_nodes(self) -> List[NodeProto]:
         return self._const_nodes
 
     @property
-    def sorted_nodes(self):
+    def sorted_nodes(self) -> List[NodeProto]:
         return self._sorted_nodes
 
     @property
-    def original_graph(self):
+    def original_graph(self) -> GraphProto:
         return self._graph
 
     @property
-    def node_arg_infos(self):
+    def node_arg_infos(self) -> Dict[str, TensorInfo]:
         return self._node_arg_infos
 
     def _decompose(self):
@@ -142,18 +137,27 @@ class SortedGraph(object):
                 for input in node.input:
                     input_infos.append(self._node_arg_infos[input])
                 output_infos = TypeAndShapeInfer.infer(node, input_infos)
-                if len(node.output) == 1:
-                    self._node_arg_infos[node.output[0]] = output_infos
-                else:
-                    for idx, output in enumerate(node.output):
-                        self._node_arg_infos[output] = output_infos[idx]
+                for idx, output in enumerate(node.output):
+                    self._node_arg_infos[output] = output_infos[idx]
             pos += 1
 
     def save_onnx(self, file_path_prefix):
-        # TODO: put shapes to the graphs.
         onnx.save(self._model, file_path_prefix + "_original.onnx")
         processed_model = copy.deepcopy(self._model)
         processed_model.graph.ClearField("node")
-        processed_model.graph.node.extend(self._const_nodes)
-        processed_model.graph.node.extend(self._sorted_nodes)
+        processed_model.graph.node.extend(self.const_nodes)
+        processed_model.graph.node.extend(self.sorted_nodes)
+        for node in itertools.chain(processed_model.graph.input, processed_model.graph.output):
+            node.type.tensor_type.shape.Clear()
+            for dim in self.node_arg_infos[node.name].shape:
+                node.type.tensor_type.shape.dim.add().dim_value = int(dim)
+        value_infos = []
+        for node in itertools.chain(self.const_nodes, self.sorted_nodes):
+            for output in node.output:
+                tensor_info = self.node_arg_infos[output]
+                value_infos.append(
+                    helper.make_tensor_value_info(output, tensor_info.dtype, [int(dim) for dim in tensor_info.shape])
+                )
+        processed_model.graph.ClearField("value_info")
+        processed_model.graph.value_info.extend(value_infos)
         onnx.save(processed_model, file_path_prefix + "_processed.onnx")
