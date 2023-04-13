@@ -47,16 +47,48 @@ index 4dd56b6e..6e22f3b6 100644
  
  if(ONNX_BUILD_TESTS)
    include(${ONNX_ROOT}/cmake/unittest.cmake)
+diff --git a/onnx/defs/schema.h b/onnx/defs/schema.h
+index fffaf3b7..ff573012 100644
+--- a/onnx/defs/schema.h
++++ b/onnx/defs/schema.h
+@@ -18,6 +18,7 @@
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
++#include <map>
+ 
+ #include "onnx/common/common.h"
+ #include "onnx/common/constants.h"
 diff --git a/onnx/onnx_pb.h b/onnx/onnx_pb.h
-index 73b5cf64..93465e5c 100644
+index 0aab3e26..d2337523 100644
 --- a/onnx/onnx_pb.h
 +++ b/onnx/onnx_pb.h
-@@ -55,6 +55,8 @@
- #elif defined(_MSC_VER)
- #pragma warning(push)
- #pragma warning(disable : 4146)
-+#pragma warning(disable : 4267)
-+#pragma warning(disable : 4244)
+@@ -47,10 +47,28 @@
+ #define ONNX_API ONNX_IMPORT
  #endif
  
++//  onnx/onnx-operators-ml.pb.h:1178:25:   required from here
++//  protobuf/src/google/protobuf/repeated_ptr_field.h:752:66: error: unused parameter ‘prototype’ [-Werror=unused-parameter]
++#if defined(__GNUC__)
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wunused-parameter"
++#elif defined(_MSC_VER)
++#pragma warning(push)
++#pragma warning(disable : 4146)
++#pragma warning(disable : 4127)
++#pragma warning(disable : 4267)
++#pragma warning(disable : 4244)
++#endif
++
  #ifdef ONNX_ML
+ #include "onnx/onnx-ml.pb.h"
+ #else
+ #include "onnx/onnx.pb.h"
+ #endif
+ 
++#if defined(__GNUC__)
++#pragma GCC diagnostic pop
++#elif defined(_MSC_VER)
++#pragma warning(pop)
++#endif
+ #endif // ! ONNX_ONNX_PB_H
