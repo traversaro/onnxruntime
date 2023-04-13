@@ -351,24 +351,89 @@ function Install-Pybind {
     }
 
     $final_args = $msbuild_args + "pybind11.sln"
-    Write-Host $final_args
-
-    $p = Start-Process -FilePath $msbuild_path -ArgumentList $final_args -NoNewWindow -Wait -PassThru
-    $exitCode = $p.ExitCode
-    if ($exitCode -ne 0) {
-        Write-Host -Object "Build pybind11.sln failed. Exitcode: $exitCode"
-        exit $exitCode
-    }
-
-    $final_args = $msbuild_args + "INSTALL.vcxproj"
-    $p = Start-Process -FilePath $msbuild_path -ArgumentList $final_args -NoNewWindow -Wait -PassThru
-    $exitCode = $p.ExitCode
-    if ($exitCode -ne 0) {
-        Write-Host -Object "Install pybind failed. Exitcode: $exitCode"
-        exit $exitCode
-    }
+    &$msbuild_path $final_args
+	$final_args = $msbuild_args + "INSTALL.vcxproj"
+	&$msbuild_path $final_args
+	   
     Write-Host "Installing pybind finished."
 
+    popd
+}
+
+<#
+    .Description
+    The Install-Abseil function installs Google's abseil library from source.
+
+    .PARAMETER cmake_path
+    The full path of cmake.exe
+
+    .PARAMETER src_root
+    The full path of ONNX Runtime's top level source diretory
+
+    .PARAMETER build_config
+    The value of CMAKE_BUILD_TYPE, can be Debug, Release, RelWithDebInfo or MinSizeRel.
+#>
+function Install-Abseil {
+
+    param (
+        [Parameter(Mandatory)][string]$cmake_path,
+        [Parameter(Mandatory)][string]$msbuild_path,
+        [Parameter(Mandatory)][string]$src_root,
+        [Parameter(Mandatory)][CMakeBuildType]$build_config,
+        [Parameter(Mandatory)][string[]]$cmake_extra_args
+    )
+
+    pushd .
+    $url=Get-DownloadURL -name abseil_cpp -src_root $src_root
+    Write-Host "Downloading abseil_cpp from $url"
+    $temp_dir = Get-TempDirectory
+    $absl_src_dir = Join-Path $temp_dir "abseil_cpp"
+    $download_finished = DownloadAndExtract -Uri $url -InstallDirectory $absl_src_dir -Force
+    if(-Not $download_finished){
+        exit 1
+    }
+    cd $absl_src_dir
+    cd *
+	
+	# Search patch.exe
+	$patch_path = 'C:\Program Files\Git\usr\bin\patch.exe'
+	if(-not (Test-Path $patch_path -PathType Leaf)){
+      $git_command_path = (Get-Command -CommandType Application git)[0].Path
+      Write-Host "Git command path:$git_command_path"
+      $git_installation_folder = Split-Path -Path (Split-Path -Path $git_command_path)
+      $patch_path = Join-Path -Path $git_installation_folder "usr\bin\patch.exe"
+	}
+    if(Test-Path $patch_path -PathType Leaf){
+      Write-Host "Patching abseil ..."
+      Get-Content $src_root\cmake\patches\abseil\absl_windows.patch | &$patch_path --ignore-whitespace -p1
+    } else {
+      Write-Host "Skip patching abseil since we cannot find patch.exe at $patch_path"
+    }
+	
+    # Run cmake to generate Visual Studio sln file
+    [string[]]$cmake_args = ".", "-DABSL_PROPAGATE_CXX_STD=ON", "-DCMAKE_BUILD_TYPE=$build_config", "-DBUILD_TESTING=OFF", "-DABSL_USE_EXTERNAL_GOOGLETEST=ON", "-DCMAKE_PREFIX_PATH=$install_prefix",  "-DCMAKE_INSTALL_PREFIX=$install_prefix"
+    $cmake_args += $cmake_extra_args
+
+    $p = Start-Process -FilePath $cmake_path -ArgumentList $cmake_args -NoNewWindow -Wait -PassThru
+    $exitCode = $p.ExitCode
+    if ($exitCode -ne 0) {
+        Write-Host -Object "CMake command failed. Exitcode: $exitCode"
+        exit $exitCode
+    }
+
+    $msbuild_args = "-nodeReuse:false", "-nologo", "-nr:false", "-maxcpucount", "-p:UseMultiToolTask=true", "-p:configuration=`"$build_config`""
+
+    if ($use_cache) {
+      $msbuild_args += "/p:CLToolExe=cl.exe /p:CLToolPath=C:\ProgramData\chocolatey\bin /p:TrackFileAccess=false /p:UseMultiToolTask=true"
+    }
+
+
+    $final_args = $msbuild_args + "absl.sln"
+    &$msbuild_path $final_args
+	$final_args = $msbuild_args + "INSTALL.vcxproj"
+	&$msbuild_path $final_args
+    
+    Write-Host "Installing absl finished."
     popd
 }
 
@@ -424,7 +489,7 @@ function Install-Protobuf {
     }
 
     # Run cmake to generate Visual Studio sln file
-    [string[]]$cmake_args = ".", "-Dprotobuf_DISABLE_RTTI=ON", "-DCMAKE_BUILD_TYPE=$build_config", "-Dprotobuf_BUILD_TESTS=OFF", "-DBUILD_SHARED_LIBS=OFF", "-DCMAKE_PREFIX_PATH=$install_prefix",  "-DCMAKE_INSTALL_PREFIX=$install_prefix", "-Dprotobuf_MSVC_STATIC_RUNTIME=OFF"
+    [string[]]$cmake_args = ".", "-Dprotobuf_DISABLE_RTTI=ON", "-DCMAKE_BUILD_TYPE=$build_config", "-Dprotobuf_BUILD_TESTS=OFF", "-DBUILD_SHARED_LIBS=OFF", "-DCMAKE_PREFIX_PATH=$install_prefix",  "-DCMAKE_INSTALL_PREFIX=$install_prefix", "-Dprotobuf_MSVC_STATIC_RUNTIME=OFF", "-Dprotobuf_ABSL_PROVIDER=package"
     $cmake_args += $cmake_extra_args
 
     $p = Start-Process -FilePath $cmake_path -ArgumentList $cmake_args -NoNewWindow -Wait -PassThru
@@ -441,22 +506,9 @@ function Install-Protobuf {
     }
 
     $final_args = $msbuild_args + "protobuf.sln"
-    Write-Host $final_args
-
-    $p = Start-Process -FilePath $msbuild_path -ArgumentList $final_args -NoNewWindow -Wait -PassThru
-    $exitCode = $p.ExitCode
-    if ($exitCode -ne 0) {
-        Write-Host -Object "Build protobuf.sln failed. Exitcode: $exitCode"
-        exit $exitCode
-    }
-
-    $final_args = $msbuild_args + "INSTALL.vcxproj"
-    $p = Start-Process -FilePath $msbuild_path -ArgumentList $final_args -NoNewWindow -Wait -PassThru
-    $exitCode = $p.ExitCode
-    if ($exitCode -ne 0) {
-        Write-Host -Object "Install protobuf failed. Exitcode: $exitCode"
-        exit $exitCode
-    }
+    &$msbuild_path $final_args
+	$final_args = $msbuild_args + "INSTALL.vcxproj"
+	&$msbuild_path $final_args
     Write-Host "Installing protobuf finished."
     popd
 }
@@ -476,6 +528,9 @@ function Install-ONNX {
 
     pushd .
 
+    Write-Host "Uninstalling onnx and ignore errors if there is any..."
+    python.exe -m pip uninstall -y onnx -qq
+	
     Write-Host "Installing python packages..."
     $p = Start-Process -NoNewWindow -Wait -PassThru -FilePath "python.exe" -ArgumentList "-m", "pip", "install", "--disable-pip-version-check", "setuptools", "wheel", "numpy", "protobuf==$protobuf_version"
     $exitCode = $p.ExitCode
@@ -493,6 +548,22 @@ function Install-ONNX {
     }
     cd $onnx_src_dir
     cd *
+
+	# Search patch.exe
+	$patch_path = 'C:\Program Files\Git\usr\bin\patch.exe'
+	if(-not (Test-Path $patch_path -PathType Leaf)){
+      $git_command_path = (Get-Command -CommandType Application git)[0].Path
+      Write-Host "Git command path:$git_command_path"
+      $git_installation_folder = Split-Path -Path (Split-Path -Path $git_command_path)
+      $patch_path = Join-Path -Path $git_installation_folder "usr\bin\patch.exe"
+	}
+    if(Test-Path $patch_path -PathType Leaf){
+      Write-Host "Patching onnx ..."
+      Get-Content $src_root\cmake\patches\onnx\onnx.patch | &$patch_path --ignore-whitespace -p1
+    } else {
+      Write-Host "Skip patching onnx since we cannot find patch.exe at $patch_path"
+    }
+
     [String]$requirements_txt_content = "protobuf==$protobuf_version`n"
     foreach($line in Get-Content '.\requirements.txt') {
       if($line -match "^protobuf"){
@@ -509,16 +580,11 @@ function Install-ONNX {
     if($build_config -eq 'Debug'){
        $Env:DEBUG='1'
     }
-    $Env:CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON -DONNX_USE_LITE_PROTO=OFF"
+    $Env:CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON -DONNX_USE_LITE_PROTO=OFF -DCMAKE_INSTALL_PREFIX=$install_prefix"
 
-    $p = Start-Process -NoNewWindow -Wait -PassThru -FilePath "python.exe" -ArgumentList "setup.py", "bdist_wheel"
-    $exitCode = $p.ExitCode
-    if ($exitCode -ne 0) {
-        Write-Host -Object "Generate wheel file failed. Exitcode: $exitCode"
-        exit $exitCode
-    }
-    Write-Host "Uninstalling onnx and ignore errors if there is any..."
-    python -m pip uninstall -y onnx -qq
+    python.exe "setup.py" "bdist_wheel"
+    
+    
     Write-Host "Installing the newly built ONNX python package"
     Get-ChildItem -Path dist/*.whl | foreach {
         $p = Start-Process -NoNewWindow -Wait -PassThru -FilePath "python.exe" -ArgumentList "-m", "pip", "--disable-pip-version-check", "install", "--upgrade", $_.fullname
