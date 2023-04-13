@@ -6,7 +6,7 @@ include(FetchContent)
 # Pass to build
 set(ABSL_PROPAGATE_CXX_STD 1)
 set(BUILD_TESTING 0)
-
+set(ABSL_USE_EXTERNAL_GOOGLETEST ON)
 if(Patch_FOUND AND WIN32)
   set(ABSL_PATCH_COMMAND ${Patch_EXECUTABLE} --binary --ignore-whitespace -p1 < ${PROJECT_SOURCE_DIR}/patches/abseil/absl_windows.patch)
 else()

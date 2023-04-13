@@ -116,7 +116,12 @@ FetchContent_Declare(
   PATCH_COMMAND ${ONNXRUNTIME_PROTOBUF_PATCH_COMMAND}
   FIND_PACKAGE_ARGS 3.21.12 NAMES Protobuf
 )
+
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "Build protobuf tests" FORCE)
+set(protobuf_INSTALL OFF CACHE BOOL "Install protobuf binaries and files" FORCE)
+set(utf8_range_ENABLE_TESTS OFF CACHE BOOL "Build test suite" FORCE)
+set(utf8_range_ENABLE_INSTALL OFF CACHE BOOL "Configure installation" FORCE)
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
   set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "Build protobuf tests" FORCE)
   set(protobuf_WITH_ZLIB OFF CACHE BOOL "Build with zlib support" FORCE)
