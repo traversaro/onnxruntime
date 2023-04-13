@@ -27,8 +27,11 @@ struct ParameterOptimizerState {
  */
 struct GroupOptimizerState {
   int64_t step = 0;
-  float initial_lr = 0.001f;        // Default value used in torch AdamW
-  float learning_rate{initial_lr};  // Adaptive learning rate as training proceeds.
+  float initial_lr = 0.001f;  // Default value used in torch AdamW
+
+  // Adaptive learning rate as training proceeds. Be noted, learning_rate can be
+  // restored by lr scheduler from given step and initial_lr, though, we still save/load this in checkpoint.
+  float learning_rate{initial_lr};
   std::unordered_map<std::string, ParameterOptimizerState> param_named_optimizer_states;
 };
 
@@ -43,10 +46,27 @@ struct OptimizerCheckpointState {
   const DataTransferManager* optimizer_session_data_transfer_mgr;
 };
 
-enum class OptimizerType {
-  AdamW,
-  // More optimizers can be added later as:
-  // Lamb,
+struct OptimizerAlgorithmBase {
+  OptimizerAlgorithmBase(const std::vector<std::string>& momentum_keys,
+                         const std::vector<std::string>& optimizer_states_inputs)
+      : momentum_keys(momentum_keys), optimizer_states_inputs(optimizer_states_inputs) {}
+  std::vector<std::string> momentum_keys;
+  std::vector<std::string> optimizer_states_inputs;
+};
+
+struct AdamWOptimizerAlgorithm : public OptimizerAlgorithmBase {
+  AdamWOptimizerAlgorithm() : OptimizerAlgorithmBase({"momentum0", "momentum1"},
+                                                     {"first_order_moments", "second_order_moments"}) {}
+};
+
+struct SGDOptimizerV2Algorithm : public OptimizerAlgorithmBase {
+  SGDOptimizerV2Algorithm() : OptimizerAlgorithmBase({"momentum0"},
+                                                     {"first_order_moments"}) {}
+};
+
+struct OptimizerAlorithmFactory {
+  static std::shared_ptr<OptimizerAlgorithmBase> CreateInstance(const std::string& optim_path_or_bytes,
+                                                                int32_t& group_count);
 };
 
 struct Optimizer {
@@ -64,8 +84,20 @@ struct Optimizer {
 
   Status Step();
 
+  /**
+   * @brief Get current optimizer state and store the CPU copy in optimizer_checkpoint_states.
+   *
+   * Be noted there are a copy underlying between devices (CPUtoCPU, CUDAtoCPU).
+   * @return Status
+   */
   Status GetStateDict(OptimizerCheckpointState& optimizer_checkpoint_states);
 
+  /**
+   * @brief Load states from optimizer_checkpoint_states into current optimizer state.
+   *
+   * Be noted there are a copy underlying between devices (CPUtoCPU, CPUtoCUDA).
+   * @return Status
+   */
   Status LoadStateDict(const OptimizerCheckpointState& optimizer_checkpoint_states);
 
   Status SetLearningRate(float lr) {
@@ -88,20 +120,42 @@ struct Optimizer {
     return optimizer_state_.step;
   }
 
-  // Generates optimizer momentum states for applicable optimizer types
+  // Generates optimizer momentum states for parameters that require grad.
   Status GenerateMomentumNamedStates();
   // Constructs the ortvalue inputs to be fed to the graph
   // at each step
   Status ConstructInputs();
 
-  // TODO: load this info from checkpoint
-  OptimizerType optimizer_type_ = OptimizerType::AdamW;
+  /**
+ * @brief Copy optimizer states between src and dest across different devices.
+ *
+ * Be noted: upon calling GetStateDict/LoadStateDict, a copy will be done
+ * (potentially across two same/different devices).
+ *
+ * @param src_group_optimizer_state Can be optimizer state (on CPU/CUDA) passed in by caller;
+ *  or the state currently maintained (on CPU/CUDA).
+ * @param dst_group_optimizer_state Can be optimizer state (on CPU/CUDA) passed in by caller;
+ *  or the state currently maintained (on CPU/CUDA).
+ * @param src_strict_match If true, for any trainable param, its states MUST exist in src_group_optimizer_state;
+ *  otherwise fail. If False, the param state will be skipped to copy.
+ * @param dst_strict_match If true, for any trainable param, its states MUST exist in dst_group_optimizer_state;
+ *  otherwise fail. If False and src state exist,  a new state will be created in dst_group_optimizer_state.
+ * @return Status
+ */
+  Status CopyOptimizerState(const GroupOptimizerState& src_group_optimizer_state,
+                            GroupOptimizerState& dst_group_optimizer_state,
+                            bool src_strict_match = false,
+                            bool dst_strict_match = false);
+
+  std::shared_ptr<OptimizerAlgorithmBase> optimizer_algo_shared_ptr_;
   std::unique_ptr<onnxruntime::InferenceSession> optim_sess_;
-  const std::unordered_map<std::string, std::shared_ptr<Parameter>>& named_parameters_;
+  const std::unordered_map<std::string, std::shared_ptr<Parameter>> named_parameters_;
   GroupOptimizerState optimizer_state_;
   std::vector<std::string> input_names_;
   std::vector<std::string> output_names_;
   std::vector<OrtValue> inputs_;
+
+  int32_t group_count_{0};
 };
 
 }  // namespace api
