@@ -81,7 +81,7 @@ class QGemm : protected GemmBase, public MatMulIntegerBase {
     }
 
     if (c != nullptr) {
-      GemmBroadcastBias(M, N, 1.f, c->Data<int32_t>(), &(c->Shape()), gemm_output_data);
+      GemmBroadcastBias<int32_t>(M, N, 1, c->Data<int32_t>(), &(c->Shape()), gemm_output_data);
     }
 
     MLAS_GEMM_QUANT_SHAPE_PARAMS gemm_shape{M, N, K, a_is_signed, b_is_signed, c != nullptr};

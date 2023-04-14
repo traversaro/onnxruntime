@@ -45,9 +45,9 @@ class GemmHelper {
     ORT_ENFORCE(M_ >= 0 && K_ > 0 && N_ >= 0);
   }
 
-  int64_t M() const { return M_; }
-  int64_t N() const { return N_; }
-  int64_t K() const { return K_; }
+  ptrdiff_t M() const { return M_; }
+  ptrdiff_t N() const { return N_; }
+  ptrdiff_t K() const { return K_; }
   Status State() const { return status_; }
 
  private:
@@ -66,14 +66,14 @@ class GemmHelper {
   }
 
  private:
-  int64_t M_;
-  int64_t K_;
-  int64_t N_;
+  ptrdiff_t M_;
+  ptrdiff_t K_;
+  ptrdiff_t N_;
   Status status_;
 };
 
 template <typename T>
-void GemmBroadcastBias(int64_t M, int64_t N, float beta,
+void GemmBroadcastBias(int64_t M, int64_t N, T beta,
                               const T* c_data, const TensorShape* c_shape,
                               T* y_data)
 {

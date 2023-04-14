@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "gtest/gtest.h"
+#include "core/mlas/inc/mlas.h"
 #include "core/framework/run_options.h"
 #include "test/common/cuda_op_test_utils.h"
 #include "test/providers/provider_test_utils.h"
@@ -62,7 +63,6 @@ TEST(GemmOpTest, GemmNoTrans_double) {
 }
 
 // Only CUDA and ROCM kernel has float 16 support
-#if defined(USE_CUDA) || defined(USE_ROCM)
 TEST(GemmOpTest, GemmNoTrans_f16) {
 #ifdef USE_CUDA
   int min_cuda_architecture = 530;
@@ -71,7 +71,7 @@ TEST(GemmOpTest, GemmNoTrans_f16) {
     return;
   }
 #endif
-  OpTester test("Gemm");
+  OpTester test("Gemm", 13);
 
   test.AddAttribute("transA", (int64_t)0);
   test.AddAttribute("transB", (int64_t)0);
@@ -102,7 +102,7 @@ TEST(GemmOpTest, GemmNoTrans_f16) {
       .Config(run_with_tunable_op)
       .RunWithConfig();
 }
-#endif
+
 
 #if defined(USE_CUDA) || defined(USE_ROCM) || defined(USE_DNNL)
 TEST(GemmOpTest, GemmNoTrans_bfloat16) {
