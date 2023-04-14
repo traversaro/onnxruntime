@@ -127,6 +127,7 @@ void Gemm<Eigen::half, ThreadPool>(CBLAS_TRANSPOSE TransA, CBLAS_TRANSPOSE Trans
   }
 }
 
+#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
 static bool IsMatrixZero(MLFloat16* C, ptrdiff_t size) {
   if (C == nullptr) {
     return true;
@@ -136,7 +137,7 @@ static bool IsMatrixZero(MLFloat16* C, ptrdiff_t size) {
   }
   return true;
 }
-
+#endif
 template <>
 void Gemm<MLFloat16, ThreadPool>(CBLAS_TRANSPOSE TransA, CBLAS_TRANSPOSE TransB, ptrdiff_t M,
                                  ptrdiff_t N, ptrdiff_t K, MLFloat16 alpha, const MLFloat16* A, const MLFloat16* B, MLFloat16 beta,
@@ -156,8 +157,16 @@ void Gemm<MLFloat16, ThreadPool>(CBLAS_TRANSPOSE TransA, CBLAS_TRANSPOSE TransB,
     return;
   }
 #endif
-  Gemm<Eigen::half, ThreadPool>(TransA, TransB, M, N, K, *reinterpret_cast<Eigen::half*>(&alpha),
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+#endif
+    Gemm<Eigen::half, ThreadPool>(TransA, TransB, M, N, K, *reinterpret_cast<Eigen::half*>(&alpha),
                                 reinterpret_cast<const Eigen::half*>(A), reinterpret_cast<const Eigen::half*>(B), *reinterpret_cast<Eigen::half*>(&beta), reinterpret_cast<Eigen::half*>(C), tp);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+  
 }
 
 
