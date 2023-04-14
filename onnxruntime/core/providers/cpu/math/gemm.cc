@@ -131,10 +131,16 @@ void Gemm<T>::ComputeGemm(CBLAS_TRANSPOSE trans_a, CBLAS_TRANSPOSE trans_b,
 
   // Broadcast the bias as needed if bias is given
   GemmBroadcastBias(M, N, beta, c_data, c_shape, y_data);
-
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
   //MLFloat16's constructor is explict, so here we need to use memset
   if (c_data == nullptr)
     memset(&beta, 0, sizeof(T));
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
   math::Gemm<T>(trans_a, trans_b,
                 M, N, K,
                 alpha,
