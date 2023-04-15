@@ -2521,10 +2521,12 @@ def main():
                     "Only Windows ARM(64) cross-compiled builds supported " "currently through this script"
                 )
             if not is_docker() and not args.use_acl and not args.use_armnn:
-                install_python_deps()
+                pass
+                #install_python_deps()
 
         if args.enable_pybind and is_windows():
-            install_python_deps(args.numpy_version)
+            pass
+            #install_python_deps(args.numpy_version)
 
         if args.use_cuda and args.cuda_version is None:
             if is_windows():
