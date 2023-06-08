@@ -25,7 +25,7 @@ struct KernelRegistryAndStatus {
 
 namespace onnxruntime {
 void CPUExecutionProvider::RegisterAllocator(AllocatorManager& allocator_manager) {
-  OrtDevice cpu_device{OrtDevice::CPU, OrtDevice::MemType::DEFAULT, DEFAULT_CPU_ALLOCATOR_DEVICE_ID};
+  OrtDevice cpu_device{OrtDevice::CPU, OrtDevice::MemType::DEFAULT, static_cast<OrtDevice::DeviceId>(DEFAULT_CPU_ALLOCATOR_DEVICE_ID)};
   auto cpu_alloc = allocator_manager.GetAllocator(OrtMemTypeDefault, cpu_device);
 
   if (!cpu_alloc) {

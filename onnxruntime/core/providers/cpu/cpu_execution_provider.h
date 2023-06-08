@@ -38,7 +38,7 @@ class CPUExecutionProvider : public IExecutionProvider {
 #endif
 
     AllocatorCreationInfo device_info{[](int) { return std::make_unique<CPUAllocator>(); },
-                                      DEFAULT_CPU_ALLOCATOR_DEVICE_ID, create_arena};
+                                      static_cast<OrtDevice::DeviceId>(DEFAULT_CPU_ALLOCATOR_DEVICE_ID), create_arena};
 
     InsertAllocator(CreateAllocator(device_info));
   }
