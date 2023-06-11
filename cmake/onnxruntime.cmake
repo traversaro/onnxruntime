@@ -67,6 +67,8 @@ if(WIN32)
     "${ONNXRUNTIME_ROOT}/core/dll/dllmain.cc"
     "${ONNXRUNTIME_ROOT}/core/dll/onnxruntime.rc"
   )
+  # Workaround for https://github.com/conda-forge/onnxruntime-feedstock/pull/56#issuecomment-1586080419
+  set_target_properties(onnxruntime PROPERTIES OUTPUT_NAME onnxruntime_conda)
 elseif(onnxruntime_BUILD_APPLE_FRAMEWORK)
   get_mobile_api_headers(APPLE_FRAMEWORK_HEADERS)
 
