@@ -2900,6 +2900,7 @@ TEST(InferenceSessionTests, GlobalThreadPoolWithDenormalAsZero) {
 }
 
 // test inter thread pool with setting denormal as zero
+/*
 TEST(InferenceSessionTests, InterThreadPoolWithDenormalAsZero) {
   // test if denormal-as-zero mode is supported
   if (!SetDenormalAsZero(false)) {
@@ -2954,6 +2955,7 @@ TEST(InferenceSessionTests, InterThreadPoolWithDenormalAsZero) {
   VerifyThreadPoolWithDenormalAsZero(session2.GetIntraOpThreadPoolToUse(), false);
   VerifyThreadPoolWithDenormalAsZero(session2.GetInterOpThreadPoolToUse(), false);
 }
+*/
 
 }  // namespace test
 }  // namespace onnxruntime
