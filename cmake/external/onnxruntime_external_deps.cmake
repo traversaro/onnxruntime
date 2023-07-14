@@ -182,7 +182,13 @@ FetchContent_Declare(
   mp11
   URL ${DEP_URL_mp11}
   URL_HASH SHA1=${DEP_SHA1_mp11}
+  FIND_PACKAGE_ARGS NAMES Boost
 )
+# If no BoostConfig.cmake is installed, Boost::mp11 is not defined,
+# so we need to define it
+if(NOT TARGET Boost::mp11 AND TARGET Boost::boost)
+  add_library(Boost::mp11 ALIAS Boost::boost)
+endif()
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 set(JSON_Install OFF CACHE INTERNAL "")
