@@ -280,7 +280,7 @@ if (NOT WIN32)
   endif()
 endif()
 
-if(onnxruntime_USE_CUDA)
+if(FALSE)
   FetchContent_Declare(
     GSL
     URL ${DEP_URL_microsoft_gsl}
